@@ -33,7 +33,10 @@ class CockroachDBConfig(DBConfig):
     pool_size: int = 100
     max_overflow: int = 100
     pool_recycle: int = 3600
+    pool_max_idle: int = 300  # seconds before idle connections are closed
+    pool_reconnect_timeout: float = 10.0  # seconds to wait for reconnection
     connect_timeout: int = 10
+    statement_timeout: int = 60  # seconds for query execution timeout
     sslmode: str = "disable"  # Options: disable, require, verify-ca, verify-full
     sslrootcert: str | None = None  # Path to CA cert (for verify-ca, verify-full)
     sslcert: str | None = None  # Path to client cert (for mutual TLS)
@@ -66,7 +69,10 @@ class CockroachDBConfig(DBConfig):
             "pool_size": self.pool_size,
             "max_overflow": self.max_overflow,
             "pool_recycle": self.pool_recycle,
+            "pool_max_idle": self.pool_max_idle,
+            "pool_reconnect_timeout": self.pool_reconnect_timeout,
             "connect_timeout": self.connect_timeout,
+            "statement_timeout": self.statement_timeout,
         }
 
 
@@ -103,6 +109,17 @@ class CockroachDBIndexConfig(BaseModel, DBCaseConfig):
     max_partition_size: int | None = 128
     build_beam_size: int | None = 8
     vector_search_beam_size: int | None = 32
+
+    # Additional indexes for optimizing filtered searches
+    create_metadata_index: bool = False
+    create_label_vector_index: bool = False
+
+    # Timeout and retry settings (configurable for different environments)
+    index_creation_timeout: int = 1200  # seconds to wait for index creation (default 20 min)
+    index_poll_interval: int = 5  # seconds between index status checks
+    insert_max_retries: int = 5  # maximum retry attempts for insert operations
+    insert_retry_initial_delay: float = 0.5  # initial delay in seconds before first retry
+    insert_retry_backoff_factor: float = 2.0  # exponential backoff multiplier
 
     def parse_metric(self) -> str:
         """Parse metric type to CockroachDB opclass."""

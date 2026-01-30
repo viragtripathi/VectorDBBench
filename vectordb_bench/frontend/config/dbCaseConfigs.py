@@ -1732,6 +1732,123 @@ CaseConfigParamInput_VectorSearchBeamSize_CockroachDB = CaseConfigInput(
     },
 )
 
+CaseConfigParamInput_CreateIndexBeforeLoad_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.create_index_before_load,
+    inputHelp="Create vector index before loading data (faster for large datasets)",
+    inputType=InputType.Bool,
+    inputConfig={
+        "value": False,
+    },
+)
+
+CaseConfigParamInput_CreateMetadataIndex_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.create_metadata_index,
+    inputHelp="Create B-tree index on metadata_id for faster filtered searches",
+    inputType=InputType.Bool,
+    inputConfig={
+        "value": False,
+    },
+)
+
+CaseConfigParamInput_CreateLabelVectorIndex_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.create_label_vector_index,
+    inputHelp="Create composite vector index on (label, embedding) for label filtering",
+    inputType=InputType.Bool,
+    inputConfig={
+        "value": False,
+    },
+)
+CaseConfigParamInput_IndexCreationTimeout_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.index_creation_timeout,
+    inputHelp="Timeout in seconds for index creation (default: 1200)",
+    inputType=InputType.Number,
+    inputConfig={
+        "min": 60,
+        "max": 7200,
+        "value": 1200,
+    },
+)
+
+CaseConfigParamInput_InsertMaxRetries_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.insert_max_retries,
+    inputHelp="Maximum retry attempts for insert operations (default: 5)",
+    inputType=InputType.Number,
+    inputConfig={
+        "min": 1,
+        "max": 20,
+        "value": 5,
+    },
+)
+
+CaseConfigParamInput_InsertRetryInitialDelay_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.insert_retry_initial_delay,
+    inputHelp="Initial delay in seconds before first retry (default: 0.5)",
+    inputType=InputType.Float,
+    inputConfig={
+        "min": 0.1,
+        "max": 10.0,
+        "value": 0.5,
+        "step": 0.1,
+    },
+)
+
+CaseConfigParamInput_InsertRetryBackoffFactor_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.insert_retry_backoff_factor,
+    inputHelp="Exponential backoff multiplier for retries (default: 2.0)",
+    inputType=InputType.Float,
+    inputConfig={
+        "min": 1.0,
+        "max": 5.0,
+        "value": 2.0,
+        "step": 0.1,
+    },
+)
+
+CaseConfigParamInput_PoolMaxIdle_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.pool_max_idle,
+    inputHelp="Maximum idle time in seconds before closing pool connections (default: 300)",
+    inputType=InputType.Number,
+    inputConfig={
+        "min": 60,
+        "max": 3600,
+        "value": 300,
+    },
+)
+
+CaseConfigParamInput_PoolReconnectTimeout_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.pool_reconnect_timeout,
+    inputHelp="Timeout in seconds for pool reconnection attempts (default: 10.0)",
+    inputType=InputType.Float,
+    inputConfig={
+        "min": 1.0,
+        "max": 60.0,
+        "value": 10.0,
+        "step": 0.1,
+    },
+)
+
+CaseConfigParamInput_StatementTimeout_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.statement_timeout,
+    inputHelp="Query statement timeout in seconds (default: 60, used for search queries)",
+    inputType=InputType.Number,
+    inputConfig={
+        "min": 10,
+        "max": 600,
+        "value": 60,
+    },
+)
+
+CaseConfigParamInput_IndexPollInterval_CockroachDB = CaseConfigInput(
+    label=CaseConfigParamType.index_poll_interval,
+    inputHelp="Interval in seconds between index status checks (default: 5)",
+    inputType=InputType.Number,
+    inputConfig={
+        "min": 1,
+        "max": 30,
+        "value": 5,
+    },
+)
+
 CaseConfigParamInput_IndexType_MariaDB = CaseConfigInput(
     label=CaseConfigParamType.IndexType,
     inputHelp="Select Index Type",
@@ -2379,6 +2496,16 @@ CockroachDBLoadingConfig = [
     CaseConfigParamInput_MaxPartitionSize_CockroachDB,
     CaseConfigParamInput_BuildBeamSize_CockroachDB,
     CaseConfigParamInput_VectorSearchBeamSize_CockroachDB,
+    CaseConfigParamInput_CreateIndexBeforeLoad_CockroachDB,
+    CaseConfigParamInput_CreateMetadataIndex_CockroachDB,
+    CaseConfigParamInput_CreateLabelVectorIndex_CockroachDB,
+    CaseConfigParamInput_IndexCreationTimeout_CockroachDB,
+    CaseConfigParamInput_IndexPollInterval_CockroachDB,
+    CaseConfigParamInput_InsertMaxRetries_CockroachDB,
+    CaseConfigParamInput_InsertRetryInitialDelay_CockroachDB,
+    CaseConfigParamInput_InsertRetryBackoffFactor_CockroachDB,
+    # Connection-level settings (pool_max_idle, pool_reconnect_timeout, statement_timeout)
+    # are configured in Step 1 (DB selection) via CockroachDBConfig, not here in Step 2
 ]
 CockroachDBPerformanceConfig = [
     CaseConfigParamInput_IndexType_CockroachDB,
@@ -2386,6 +2513,16 @@ CockroachDBPerformanceConfig = [
     CaseConfigParamInput_MaxPartitionSize_CockroachDB,
     CaseConfigParamInput_BuildBeamSize_CockroachDB,
     CaseConfigParamInput_VectorSearchBeamSize_CockroachDB,
+    CaseConfigParamInput_CreateIndexBeforeLoad_CockroachDB,
+    CaseConfigParamInput_CreateMetadataIndex_CockroachDB,
+    CaseConfigParamInput_CreateLabelVectorIndex_CockroachDB,
+    CaseConfigParamInput_IndexCreationTimeout_CockroachDB,
+    CaseConfigParamInput_IndexPollInterval_CockroachDB,
+    CaseConfigParamInput_InsertMaxRetries_CockroachDB,
+    CaseConfigParamInput_InsertRetryInitialDelay_CockroachDB,
+    CaseConfigParamInput_InsertRetryBackoffFactor_CockroachDB,
+    # Connection-level settings (pool_max_idle, pool_reconnect_timeout, statement_timeout)
+    # are configured in Step 1 (DB selection) via CockroachDBConfig, not here in Step 2
 ]
 
 OceanBaseLoadConfig = [

@@ -55,6 +55,9 @@ class CockroachDB(VectorDB):
             self.pool_size = db_config.get("pool_size", 100)
             self.max_overflow = db_config.get("max_overflow", 100)
             self.pool_recycle = db_config.get("pool_recycle", 3600)
+            self.pool_max_idle = db_config.get("pool_max_idle", 300)
+            self.pool_reconnect_timeout = db_config.get("pool_reconnect_timeout", 10.0)
+            self.statement_timeout = db_config.get("statement_timeout", 60)
         else:
             # Direct connection config for tests
             conn_params = {
@@ -77,6 +80,9 @@ class CockroachDB(VectorDB):
             self.pool_size = db_config.get("pool_size", 100)
             self.max_overflow = db_config.get("max_overflow", 100)
             self.pool_recycle = db_config.get("pool_recycle", 3600)
+            self.pool_max_idle = db_config.get("pool_max_idle", 300)
+            self.pool_reconnect_timeout = db_config.get("pool_reconnect_timeout", 10.0)
+            self.statement_timeout = db_config.get("statement_timeout", 60)
 
         self.dim = dim
         self.with_scalar_labels = with_scalar_labels
@@ -91,7 +97,9 @@ class CockroachDB(VectorDB):
         self.conn: Connection | None = None
         self.cursor: Cursor | None = None
 
-        log.info(f"{self.name} config: {self.connect_config}, pool_size={self.pool_size}")
+        # Log config with redacted password for security
+        safe_config = {k: ("***REDACTED***" if k == "password" else v) for k, v in self.connect_config.items()}
+        log.info(f"{self.name} config: {safe_config}, pool_size={self.pool_size}")
 
         # Allow manual index creation (both flags can be False)
         # This is useful when CREATE INDEX times out in subprocess on multi-node clusters
@@ -127,7 +135,9 @@ class CockroachDB(VectorDB):
                 self._drop_table(cursor, conn)
                 self._create_table(cursor, conn, dim)
                 if self.case_config is not None and self.case_config.create_index_before_load:
-                    self._create_index()  # Use SQLAlchemy
+                    log.info(f"{self.name} creating vector index BEFORE loading data (create_index_before_load=True)")
+                    self._create_index()
+                    log.info(f"{self.name} vector index created successfully before load")
         finally:
             cursor.close()
             conn.close()
@@ -169,7 +179,8 @@ class CockroachDB(VectorDB):
             conninfo += f" sslkey={self.connect_config['sslkey']}"
 
         # Add all settings in connection options to avoid per-connection overhead
-        conninfo += f" options='-c statement_timeout=600s -c vector_search_beam_size={beam_size}'"
+        # Use configurable statement_timeout (default 60s for search queries)
+        conninfo += f" options='-c statement_timeout={self.statement_timeout}s -c vector_search_beam_size={beam_size}'"
 
         # Configure each connection with vector support (lightweight operation)
         def configure_connection(conn: Connection) -> None:
@@ -181,45 +192,29 @@ class CockroachDB(VectorDB):
             min_size=self.pool_size,
             max_size=self.pool_size + self.max_overflow,
             max_lifetime=self.pool_recycle,
-            max_idle=300,
-            reconnect_timeout=10.0,
+            max_idle=self.pool_max_idle,
+            reconnect_timeout=self.pool_reconnect_timeout,
             configure=configure_connection,
         )
 
     @contextmanager
     def init(self) -> Generator[None, None, None]:
-        """Initialize connection pool for benchmark operations."""
+        """Initialize connection pool for benchmark operations.
+        
+        Note: We don't hold a connection during init - the pool is shared across
+        all operations (insert, search). Each operation gets connections from the pool
+        as needed, ensuring maximum concurrency.
+        """
         self.pool = self._create_connection_pool()
 
         try:
-            with self.pool.connection() as conn:
-                conn.autocommit = False
-                self.conn = conn
-                self.cursor = conn.cursor()
-
-                # Set session parameters (only if case_config is provided)
-                if self.case_config is not None:
-                    session_options = self.case_config.session_param()["session_options"]
-                    for setting in session_options:
-                        param = setting["parameter"]
-                        command = sql.SQL("SET {setting_name} = {val};").format(
-                            setting_name=sql.Identifier(param["setting_name"]),
-                            val=sql.Literal(int(param["val"])),
-                        )
-                        log.debug(command.as_string(self.cursor))
-                        self.cursor.execute(command)
-                    conn.commit()
-
-                yield
+            # Set session parameters if needed (these are already set in connection options)
+            # No need to hold a connection here - let operations get connections from pool
+            yield
         finally:
-            if self.cursor:
-                self.cursor.close()
-            if self.conn:
-                self.conn.close()
             if self.pool:
-                self.pool.close()
-            self.cursor = None
-            self.conn = None
+                # Give pool threads more time to shut down gracefully (especially for long-running queries)
+                self.pool.close(timeout=30)
             self.pool = None
 
     def _cancel_running_schema_jobs(self):
@@ -368,11 +363,128 @@ class CockroachDB(VectorDB):
         finally:
             conn.close()
 
+    def _create_metadata_index(self):
+        """Create B-tree index on metadata_id for efficient metadata filtering."""
+        import time
+
+        index_name = f"{self.table_name}_metadata_idx"
+        sql_str = f"CREATE INDEX IF NOT EXISTS {index_name} ON {self.table_name} ({self._metadata_field})"
+
+        log.info(f"{self.name} creating metadata index: {index_name}")
+        log.info(f"Metadata index SQL: {sql_str}")
+
+        conn = psycopg.connect(**self.connect_config)
+        conn.autocommit = True
+        try:
+            cursor = conn.cursor()
+            start_time = time.time()
+            cursor.execute(sql_str)
+            elapsed = time.time() - start_time
+            log.info(f"{self.name} metadata index created in {elapsed:.1f}s")
+            cursor.close()
+        finally:
+            conn.close()
+
+    def _create_label_vector_index(self):
+        """Create composite vector index on (label, embedding) for label filtering."""
+        import time
+
+        if not self.with_scalar_labels:
+            log.warning(f"{self.name} skipping label+vector index: with_scalar_labels is False")
+            return
+
+        index_name = f"{self.table_name}_label_vector_idx"
+        index_param = self.case_config.index_param()
+
+        # Build WITH clause for index parameters (same as vector index)
+        options_list = []
+        for option in index_param["index_creation_with_options"]:
+            if option["val"] is not None:
+                options_list.append(f"{option['option_name']} = {option['val']}")
+
+        with_clause = f" WITH ({', '.join(options_list)})" if options_list else ""
+
+        # Composite vector index: (label, embedding)
+        sql_str = (
+            f"CREATE VECTOR INDEX IF NOT EXISTS {index_name} "
+            f"ON {self.table_name} ({self._scalar_label_field}, {self._vector_field} {index_param['metric']})"
+            f"{with_clause}"
+        )
+
+        log.info(f"{self.name} creating label+vector composite index: {index_name}")
+        log.info(f"Label+vector index SQL: {sql_str}")
+
+        start_time = time.time()
+        try:
+            conn = psycopg.connect(**self.connect_config)
+            conn.autocommit = True
+            try:
+                cursor = conn.cursor()
+                cursor.execute(sql_str)
+                elapsed = time.time() - start_time
+                log.info(f"{self.name} label+vector index created in {elapsed:.1f}s")
+                cursor.close()
+            finally:
+                conn.close()
+        except Exception as e:
+            elapsed = time.time() - start_time
+            error_msg = str(e)
+            if (
+                "server closed the connection" in error_msg
+                or "statement timeout" in error_msg.lower()
+                or "connection" in error_msg.lower()
+            ):
+                log.warning(
+                    f"{self.name} label+vector index creation timeout after {elapsed:.1f}s - "
+                    f"may continue in background: {e}"
+                )
+                # Wait for background completion
+                self._wait_for_index_creation_by_name(index_name, start_time)
+            else:
+                raise
+
+    def _wait_for_index_creation_by_name(self, index_name: str, start_time: float) -> None:
+        """Wait for background index creation to complete by index name."""
+        import time
+
+        max_wait = 600  # 10 minutes max for composite indexes
+        poll_interval = self.case_config.index_poll_interval if self.case_config else 5
+        waited = 0
+
+        while waited < max_wait:
+            time.sleep(poll_interval)
+            waited += poll_interval
+
+            try:
+                check_conn = psycopg.connect(**self.connect_config)
+                check_conn.autocommit = True  # Use autocommit to avoid stale snapshot reads
+                check_cursor = check_conn.cursor()
+                try:
+                    check_cursor.execute(
+                        "SELECT 1 FROM pg_indexes WHERE tablename = %s AND indexname = %s",
+                        (self.table_name, index_name),
+                    )
+                    if check_cursor.fetchone():
+                        total_time = time.time() - start_time
+                        log.info(f"Index {index_name} created successfully (total time: {total_time:.1f}s)")
+                        return
+                    log.info(f"Waiting for index {index_name}... ({waited}s elapsed)")
+                finally:
+                    check_cursor.close()
+                    check_conn.close()
+            except Exception as check_error:
+                log.warning(f"Error checking index status: {check_error}")
+
+        msg = f"Timeout waiting for index {index_name} after {waited}s"
+        log.error(msg)
+        raise RuntimeError(msg)
+
     def _wait_for_index_creation(self, start_time: float) -> None:
         """Wait for background index creation to complete after connection timeout."""
         import time
 
-        max_wait = 300  # 5 minutes max
+        # Use configurable timeout
+        max_wait = self.case_config.index_creation_timeout if self.case_config else 600
         poll_interval = 5
         waited = 0
 
@@ -383,29 +495,21 @@ class CockroachDB(VectorDB):
             # Create fresh connection to check status
             try:
                 check_conn = psycopg.connect(**self.connect_config)
+                check_conn.autocommit = True  # Use autocommit to avoid stale snapshot reads
                 check_cursor = check_conn.cursor()
                 try:
-                    # Check if index exists
+                    # Check if index exists using pg_indexes (compatible with both PostgreSQL and CockroachDB)
                     check_cursor.execute(
-                        "SELECT 1 FROM pg_indexes WHERE tablename = %s AND indexname = %s",
+                        "SELECT indexname FROM pg_indexes WHERE tablename = %s AND indexname = %s",
                         (self.table_name, self._index_name),
                     )
                     if check_cursor.fetchone():
-                        # Index exists! Verify it's usable by doing a quick test query
-                        try:
-                            from psycopg import sql
-
-                            check_cursor.execute(
-                                sql.SQL("SELECT 1 FROM {} LIMIT 1").format(sql.Identifier(self.table_name))
-                            )
-                            check_cursor.fetchone()
-                            total_time = time.time() - start_time
-                            log.info(f"Index {self._index_name} created successfully (total time: {total_time:.1f}s)")
-                        except Exception as query_error:
-                            # Index not yet usable
-                            log.info(f"Index exists but not yet usable... ({waited}s elapsed, error: {query_error})")
-                        else:
-                            return
+                        # Index exists and should be ready
+                        total_time = time.time() - start_time
+                        log.info(f"Index {self._index_name} created successfully (total time: {total_time:.1f}s)")
+                        return
+                    else:
+                        log.info(f"Waiting for index {self._index_name}... ({waited}s elapsed)")
                 finally:
                     check_cursor.close()
                     check_conn.close()
@@ -477,7 +581,6 @@ class CockroachDB(VectorDB):
                         cursor.execute(sql_str)
                         elapsed = time.time() - start_time
                         log.info(f"{self.name} index created successfully in {elapsed:.1f}s")
-                        return  # Success!
             except Exception as e:
                 elapsed = time.time() - start_time
                 error_msg = str(e)
@@ -499,7 +602,14 @@ class CockroachDB(VectorDB):
             if connection_closed:
                 self._wait_for_index_creation(start_time)
 
-    @db_retry(max_attempts=3, initial_delay=0.5, backoff_factor=2.0)
+        # Create additional indexes if configured
+        if self.case_config is not None:
+            if self.case_config.create_metadata_index:
+                self._create_metadata_index()
+            if self.case_config.create_label_vector_index:
+                self._create_label_vector_index()
+
+    @db_retry(max_attempts=5, initial_delay=0.5, backoff_factor=2.0)
     def insert_embeddings(
         self,
         embeddings: list[list[float]],
@@ -507,42 +617,69 @@ class CockroachDB(VectorDB):
         labels_data: list[str] | None = None,
         **kwargs: Any,
     ) -> tuple[int, Exception | None]:
-        """Insert embeddings with COPY for performance."""
-        assert self.conn is not None, "Connection is not initialized"
-        assert self.cursor is not None, "Cursor is not initialized"
+        """Insert embeddings with COPY for performance.
+
+        Performance notes:
+        - Insertions with pre-existing vector indexes are slower due to index maintenance
+        - For large datasets (500K+ vectors): create_index_after_load is typically faster
+        - For incremental loads: create_index_before_load avoids backfill overhead
+
+        Error handling:
+        - RETRY_SERIALIZABLE errors from index updates are handled by @db_retry decorator
+        - Transaction rollback ensures clean retry state
+        - Connection failures trigger fresh connection from pool
+        """
+        assert self.pool is not None, "Connection pool is not initialized"
 
         if self.with_scalar_labels:
             assert labels_data is not None, "labels_data required when with_scalar_labels=True"
 
-        try:
-            metadata_arr = np.array(metadata)
-            embeddings_arr = np.array(embeddings)
+        # Get a fresh connection from pool for each attempt (handles connection failures)
+        with self.pool.connection() as conn:
+            conn.autocommit = False
+            try:
+                metadata_arr = np.array(metadata)
+                embeddings_arr = np.array(embeddings)
 
-            # UUID primary key is auto-generated, we only insert metadata_id and embedding
-            with self.cursor.copy(
-                sql.SQL(
-                    "COPY {table_name} ({metadata_field}, {vector_field}{label_field}) FROM STDIN (FORMAT BINARY)"
-                ).format(
-                    table_name=sql.Identifier(self.table_name),
-                    metadata_field=sql.Identifier(self._metadata_field),
-                    vector_field=sql.Identifier(self._vector_field),
-                    label_field=sql.SQL(f", {self._scalar_label_field}") if self.with_scalar_labels else sql.SQL(""),
-                )
-            ) as copy:
-                for i, row in enumerate(metadata_arr):
-                    if self.with_scalar_labels:
-                        copy.set_types(["bigint", "vector", "varchar"])
-                        copy.write_row((row, embeddings_arr[i], labels_data[i]))
-                    else:
-                        copy.set_types(["bigint", "vector"])
-                        copy.write_row((row, embeddings_arr[i]))
+                with conn.cursor() as cursor:
+                    # UUID primary key is auto-generated, we only insert metadata_id and embedding
+                    copy_sql = sql.SQL(
+                        "COPY {table_name} ({metadata_field}, {vector_field}{label_field}) "
+                        "FROM STDIN (FORMAT BINARY)"
+                    ).format(
+                        table_name=sql.Identifier(self.table_name),
+                        metadata_field=sql.Identifier(self._metadata_field),
+                        vector_field=sql.Identifier(self._vector_field),
+                        label_field=(
+                            sql.SQL(f", {self._scalar_label_field}")
+                            if self.with_scalar_labels
+                            else sql.SQL("")
+                        ),
+                    )
+                    with cursor.copy(copy_sql) as copy:
+                        # Set types ONCE outside the loop for efficiency
+                        if self.with_scalar_labels:
+                            copy.set_types(["bigint", "vector", "varchar"])
+                            for i, row in enumerate(metadata_arr):
+                                copy.write_row((row, embeddings_arr[i], labels_data[i]))
+                        else:
+                            copy.set_types(["bigint", "vector"])
+                            for i, row in enumerate(metadata_arr):
+                                copy.write_row((row, embeddings_arr[i]))
 
-            self.conn.commit()
-            return len(metadata), None
+                conn.commit()
+                return len(metadata), None
 
-        except Exception as e:
-            log.warning(f"Failed to insert data into {self.table_name}: {e}")
-            return 0, e
+            except Exception as e:
+                # Rollback on any error to clean up transaction state for next retry
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass  # Connection may already be in error state
+
+                # Re-raise so @db_retry decorator can handle transient errors
+                # No need to log here - decorator will log retry attempts
+                raise
 
     def prepare_filter(self, filters: Filter):
         """Prepare WHERE clause for filtered queries."""

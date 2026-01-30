@@ -88,6 +88,116 @@ class CockroachDBTypedDict(CommonTypedDict):
             show_default=True,
         ),
     ]
+    create_metadata_index: Annotated[
+        bool,
+        click.option(
+            "--create-metadata-index",
+            is_flag=True,
+            help="Create B-tree index on metadata_id for faster filtered searches",
+            default=False,
+            show_default=True,
+        ),
+    ]
+    create_label_vector_index: Annotated[
+        bool,
+        click.option(
+            "--create-label-vector-index",
+            is_flag=True,
+            help="Create composite vector index on (label, embedding) for label filtering",
+            default=False,
+            show_default=True,
+        ),
+    ]
+    create_index_before_load: Annotated[
+        bool,
+        click.option(
+            "--create-index-before-load",
+            is_flag=True,
+            help="Create vector index before loading data (faster for large datasets)",
+            default=False,
+            show_default=True,
+        ),
+    ]
+    index_creation_timeout: Annotated[
+        int,
+        click.option(
+            "--index-creation-timeout",
+            type=int,
+            help="Timeout in seconds for index creation (default: 1200)",
+            default=1200,
+            show_default=True,
+        ),
+    ]
+    insert_max_retries: Annotated[
+        int,
+        click.option(
+            "--insert-max-retries",
+            type=int,
+            help="Maximum retry attempts for insert operations (default: 5)",
+            default=5,
+            show_default=True,
+        ),
+    ]
+    insert_retry_initial_delay: Annotated[
+        float,
+        click.option(
+            "--insert-retry-initial-delay",
+            type=float,
+            help="Initial delay in seconds before first retry (default: 0.5)",
+            default=0.5,
+            show_default=True,
+        ),
+    ]
+    insert_retry_backoff_factor: Annotated[
+        float,
+        click.option(
+            "--insert-retry-backoff-factor",
+            type=float,
+            help="Exponential backoff multiplier for retries (default: 2.0)",
+            default=2.0,
+            show_default=True,
+        ),
+    ]
+    pool_max_idle: Annotated[
+        int,
+        click.option(
+            "--pool-max-idle",
+            type=int,
+            help="Maximum idle time in seconds before closing pool connections (default: 300)",
+            default=300,
+            show_default=True,
+        ),
+    ]
+    pool_reconnect_timeout: Annotated[
+        float,
+        click.option(
+            "--pool-reconnect-timeout",
+            type=float,
+            help="Timeout in seconds for pool reconnection attempts (default: 10.0)",
+            default=10.0,
+            show_default=True,
+        ),
+    ]
+    statement_timeout: Annotated[
+        int,
+        click.option(
+            "--statement-timeout",
+            type=int,
+            help="Query statement timeout in seconds (default: 60, used for search queries)",
+            default=60,
+            show_default=True,
+        ),
+    ]
+    index_poll_interval: Annotated[
+        int,
+        click.option(
+            "--index-poll-interval",
+            type=int,
+            help="Interval in seconds between index status checks (default: 5)",
+            default=5,
+            show_default=True,
+        ),
+    ]
 
 
 @cli.command()
@@ -120,12 +230,24 @@ def CockroachDB(
             db_name=parameters["db_name"],
             sslmode=parameters.get("sslmode", "disable"),
             sslrootcert=parameters.get("sslrootcert"),
+            pool_max_idle=parameters.get("pool_max_idle", 300),
+            pool_reconnect_timeout=parameters.get("pool_reconnect_timeout", 10.0),
+            statement_timeout=parameters.get("statement_timeout", 60),
         ),
         db_case_config=CockroachDBVectorIndexConfig(
             metric_type=metric_type,
             min_partition_size=parameters.get("min_partition_size", 16),
             max_partition_size=parameters.get("max_partition_size", 128),
             vector_search_beam_size=parameters.get("vector_search_beam_size", 32),
+            create_metadata_index=parameters.get("create_metadata_index", False),
+            create_label_vector_index=parameters.get("create_label_vector_index", False),
+            create_index_before_load=parameters.get("create_index_before_load", False),
+            create_index_after_load=not parameters.get("create_index_before_load", False),
+            index_creation_timeout=parameters.get("index_creation_timeout", 1200),
+            index_poll_interval=parameters.get("index_poll_interval", 5),
+            insert_max_retries=parameters.get("insert_max_retries", 5),
+            insert_retry_initial_delay=parameters.get("insert_retry_initial_delay", 0.5),
+            insert_retry_backoff_factor=parameters.get("insert_retry_backoff_factor", 2.0),
         ),
         **parameters,
     )
